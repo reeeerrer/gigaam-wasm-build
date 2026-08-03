@@ -4,9 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       sherpa_version:
-        description: 'Версия sherpa-onnx (тег). Менять не нужно.'
+        # НЕ поднимать выше v1.13.0! С v1.13.2 wasm собирается многопоточным
+        # и требует заголовков COOP/COEP — на обычном хостинге молча виснет.
+        description: 'Версия sherpa-onnx. v1.13.0 — последняя однопоточная.'
         required: true
-        default: 'v1.13.4'
+        default: 'v1.13.0'
 
 jobs:
   build:

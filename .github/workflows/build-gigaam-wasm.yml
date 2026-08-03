@@ -1,7 +1,5 @@
 name: Сборка GigaAM для браузера
 
-# Запускается только вручную — кнопкой «Run workflow» на вкладке Actions.
-# Сама по себе сборка не стартует и минуты не тратит.
 on:
   workflow_dispatch:
     inputs:
@@ -16,16 +14,12 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      # 1. Берём исходники sherpa-onnx. Наш репозиторий тут не нужен —
-      #    в нём лежит только этот рецепт.
       - name: Скачать исходники sherpa-onnx
         uses: actions/checkout@v4
         with:
           repository: k2-fsa/sherpa-onnx
           ref: ${{ inputs.sherpa_version }}
 
-      # 2. Emscripten — компилятор C++ в WebAssembly.
-      #    Версия 4.0.23 взята из официальной сборки sherpa-onnx: другие могут не собраться.
       - name: Поставить Emscripten 4.0.23
         uses: mymindstorm/setup-emsdk@v14
         with:
@@ -35,33 +29,50 @@ jobs:
       - name: Показать версию компилятора
         run: emcc -v
 
-      # 3. Кладём модели в assets. Эта папка целиком вшивается в сборку
-      #    (--preload-file assets@.), поэтому имя файла модели может быть любым —
-      #    важно лишь, чтобы наша JS-связка запрашивала ровно его.
       - name: Скачать модель GigaAM-v3 (CTC) и VAD
         run: |
           set -ex
           cd wasm/vad-asr/assets
-
-          # GigaAM v3, русский, от мейнтейнера sherpa-onnx. int8 ≈ 225 МБ.
-          # Берём CTC (один файл, быстрее в браузере), а не transducer.
           BASE=https://huggingface.co/csukuangfj/sherpa-onnx-nemo-ctc-giga-am-v3-russian-2025-12-16/resolve/main
           curl -fSL -o nemo-ctc.onnx "$BASE/model.int8.onnx"
           curl -fSL -o tokens.txt    "$BASE/tokens.txt"
-
-          # VAD — режет длинную запись на куски с речью. Без него офлайн-модель
-          # захлебнётся на часовом совещании; плюс CMake требует этот файл.
           curl -fSL -o silero_vad.onnx \
             https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx
-
           ls -lh
+
+      # По умолчанию sherpa-onnx собирает модуль МНОГОПОТОЧНЫМ. Такому нужны
+      # заголовки COOP/COEP от сервера, а без них он молча виснет после загрузки
+      # модели. На обычном хостинге их нет — собираем в один поток.
+      - name: Убрать многопоточность
+        run: |
+          set -ex
+          sed -i 's/ -pthread -sPTHREAD_POOL_SIZE=4 //' wasm/vad-asr/CMakeLists.txt
+          grep -n "MY_FLAGS" wasm/vad-asr/CMakeLists.txt
+          if grep -q "pthread" wasm/vad-asr/CMakeLists.txt; then
+            echo "НЕ УДАЛОСЬ убрать -pthread — сборка была бы нерабочей"; exit 1
+          fi
 
       - name: Собрать WebAssembly
         run: |
           set -ex
           ./build-wasm-simd-vad-asr.sh
 
-      # 4. Готовые файлы. Их нужно скачать и положить на хостинг.
+      - name: Проверить, что сборка однопоточная
+        run: |
+          cd build-wasm-simd-vad-asr/install/bin/wasm/vad-asr
+          cat > check.cjs <<'EOF'
+          const Orig = WebAssembly.Memory;
+          WebAssembly.Memory = function (d) {
+            if (d && d.shared) { console.error('ПРОВАЛ: модуль просит разделяемую память (многопоточная сборка)'); process.exit(1); }
+            console.log('OK: однопоточная сборка, память', JSON.stringify(d)); process.exit(0);
+          };
+          global.Module = { printErr(){}, onAbort(){} };
+          require('./sherpa-onnx-wasm-main-vad-asr.js');
+          setTimeout(() => { console.error('ПРОВАЛ: память так и не создалась'); process.exit(1); }, 60000);
+          EOF
+          node check.cjs
+          rm -f check.cjs
+
       - name: Показать, что получилось
         run: ls -lh build-wasm-simd-vad-asr/install/bin/wasm/vad-asr
 
@@ -70,6 +81,4 @@ jobs:
         with:
           name: gigaam-wasm
           path: build-wasm-simd-vad-asr/install/bin/wasm/vad-asr
-          # 1 день: файлы весят ~235 МБ, а на бесплатном тарифе всего 500 МБ.
-          # Скачал — и место сразу освободилось.
           retention-days: 1

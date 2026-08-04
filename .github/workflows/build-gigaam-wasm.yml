@@ -65,13 +65,29 @@ jobs:
       # Страховка на случай, если версию всё-таки поднимут: вычищаем -pthread
       # из обоих мест, где он встречается в новых версиях. На v1.13.0 это
       # ничего не меняет (флагов там нет) — шаг просто проходит вхолостую.
-      - name: Убедиться, что сборка без потоков
+      # Две правки, обе обязательны.
+      #
+      # 1) ВКЛЮЧИТЬ исключения C++ (-fexceptions). В v1.13.0 их нет вообще, а
+      #    onnxruntime на них построен: внутри он ловит свои ошибки сам. С
+      #    выключенным перехватом любая его внутренняя ошибка вылетает наружу
+      #    «сырым» указателем, и падает создание и VAD, и распознавателя —
+      #    проверено на живой сборке. В v1.13.4 этот флаг уже добавлен.
+      #
+      # 2) УБРАТЬ -pthread, если версию поднимут: с v1.13.2 wasm собирается
+      #    многопоточным и требует COOP/COEP, которых на хостинге нет.
+      #    На v1.13.0 этих флагов нет — sed просто ничего не находит.
+      - name: Включить исключения и убрать потоки
         run: |
           set -ex
+          sed -i 's|  add_definitions(-DSHERPA_ONNX_ENABLE_WASM=1)|  add_definitions(-DSHERPA_ONNX_ENABLE_WASM=1)\n  string(APPEND CMAKE_C_FLAGS " -fexceptions")\n  string(APPEND CMAKE_CXX_FLAGS " -fexceptions")|' CMakeLists.txt
           sed -i 's/ -pthread -sPTHREAD_POOL_SIZE=4 //' wasm/vad-asr/CMakeLists.txt || true
           sed -i 's/ -pthread -fexceptions/ -fexceptions/; s/APPEND CMAKE_C_FLAGS " -pthread"/APPEND CMAKE_C_FLAGS ""/' CMakeLists.txt || true
-          echo "--- остатки упоминаний pthread в wasm-части ---"
-          grep -n "pthread" CMakeLists.txt wasm/vad-asr/CMakeLists.txt || echo "чисто"
+          echo "--- что получилось ---"
+          grep -n "fexceptions\|pthread" CMakeLists.txt || true
+          if ! grep -q "fexceptions" CMakeLists.txt; then
+            echo "ПРОВАЛ: не удалось включить исключения — сборка была бы нерабочей"; exit 1
+          fi
+          
 
       - name: Собрать WebAssembly
         run: |
